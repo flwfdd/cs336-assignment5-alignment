@@ -117,6 +117,28 @@ def get_response_log_probs(
     return result
 
 
+def masked_normalize(
+    tensor: torch.Tensor,
+    mask: torch.Tensor,
+    normalize_constant: float,
+    dim: int | None = None,
+) -> torch.Tensor:
+    """
+    Normalize the tensor along the specified dimension using the mask and normalize_constant.
+    Args:
+        tensor: torch.Tensor to be normalized
+        mask: torch.Tensor of the same shape as tensor, with 1s for valid positions and 0s for masked positions
+        normalize_constant: float, the constant to normalize by
+        dim: int or None, the dimension to normalize along
+    Returns:
+        normalized_tensor:the normalized sum, where masked elements (mask == 0) don’t contribute to the sum.
+    """
+    masked_tensor = tensor * mask
+    sum_masked_tensor = torch.sum(masked_tensor, dim=dim)
+    normalized_tensor = sum_masked_tensor / normalize_constant
+    return normalized_tensor
+
+
 if __name__ == "__main__":
     # model = PreTrainedTokenizerBase.from_pretrained(
     #     "models/Qwen2.5-Math-1.5B",
