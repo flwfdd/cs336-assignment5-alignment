@@ -1,5 +1,6 @@
 import torch
-from transformers import PreTrainedTokenizerBase, Qwen2Tokenizer  # type: ignore
+from transformers import PreTrainedTokenizerBase  # type: ignore
+from transformers import Qwen2Tokenizer  # type: ignore
 
 
 def tokenize_prompt_and_output(
@@ -54,7 +55,7 @@ def tokenize_prompt_and_output(
         input_ids[i, :total_len] = torch.tensor(
             prompt_ids + output_ids[:-1], dtype=torch.long
         )
-        if total_len < max_len: # to fix test case but maybe does not matter
+        if total_len < max_len:  # to fix test case but maybe does not matter
             input_ids[i, total_len] = output_ids[-1]
         labels[i, :total_len] = torch.tensor(
             prompt_ids[1:] + output_ids, dtype=torch.long
@@ -68,6 +69,20 @@ def tokenize_prompt_and_output(
         "labels": labels,
         "response_mask": response_mask,
     }
+
+
+def compute_entropy(logits: torch.Tensor) -> torch.Tensor:
+    """
+    Get the entropy of the next-token predictions (i.e., entropy over the vocabulary dimension).
+    Args:
+        logits: torch.Tensor of shape (batch_size, seq_len, vocab_size)
+    Returns:
+        entropy: torch.Tensor of shape (batch_size, seq_len)
+    """
+    log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+    probs = torch.nn.functional.softmax(logits, dim=-1)
+    entropy = -torch.sum(probs * log_probs, dim=-1)
+    return entropy
 
 
 if __name__ == "__main__":
