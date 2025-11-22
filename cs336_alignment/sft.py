@@ -1,4 +1,5 @@
 import torch
+from transformers import PreTrainedModel  # type: ignore
 from transformers import PreTrainedTokenizerBase  # type: ignore
 from transformers import Qwen2Tokenizer  # type: ignore
 
@@ -83,6 +84,37 @@ def compute_entropy(logits: torch.Tensor) -> torch.Tensor:
     probs = torch.nn.functional.softmax(logits, dim=-1)
     entropy = -torch.sum(probs * log_probs, dim=-1)
     return entropy
+
+
+def get_response_log_probs(
+    model: PreTrainedModel,
+    input_ids: torch.Tensor,
+    labels: torch.Tensor,
+    return_token_entropy: bool = False,
+) -> dict[str, torch.Tensor]:
+    """
+    Get the log probabilities of the response tokens given the input ids.
+    Args:
+        model: PreTrainedModel placed on the correct device and in inference mode if gradients should not be computed
+        input_ids: torch.Tensor of shape (batch_size, seq_len) prompt + response tokens
+        labels: torch.Tensor of shape (batch_size, seq_len)
+        return_token_entropy: bool, whether to return the token entropy
+    Returns:
+        A dictionary with the following keys:
+        - log_probs: torch.Tensor of shape (batch_size, seq_len) conditional log probabilities
+        - token_entropy: torch.Tensor of shape (batch_size, seq_len) (if return_token_entropy is True)
+    """
+    logits = model(input_ids).logits  # (batch_size, seq_len, vocab_size)
+    all_log_probs = torch.nn.functional.log_softmax(
+        logits, dim=-1
+    )  # (batch_size, seq_len, vocab_size)
+    log_probs = torch.gather(all_log_probs, dim=-1, index=labels.unsqueeze(-1)).squeeze(
+        -1
+    )  # (batch_size, seq_len)
+    result = {"log_probs": log_probs}
+    if return_token_entropy:
+        result["token_entropy"] = compute_entropy(logits)
+    return result
 
 
 if __name__ == "__main__":
