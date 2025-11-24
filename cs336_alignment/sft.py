@@ -1,7 +1,13 @@
+import json
+import re
+
 import torch
+from drgrpo_grader import r1_zero_reward_fn
+from transformers import AutoModelForCausalLM  # type: ignore
+from transformers import AutoTokenizer  # type: ignore
 from transformers import PreTrainedModel  # type: ignore
 from transformers import PreTrainedTokenizerBase  # type: ignore
-from transformers import Qwen2Tokenizer  # type: ignore
+from transformers.generation.utils import GenerateDecoderOnlyOutput
 
 
 def tokenize_prompt_and_output(
@@ -82,7 +88,9 @@ def compute_entropy(logits: torch.Tensor) -> torch.Tensor:
     """
     log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
     probs = torch.nn.functional.softmax(logits, dim=-1)
-    entropy = -torch.sum(probs * log_probs, dim=-1)
+    p_log_p = probs * log_probs
+    p_log_p = torch.nan_to_num(p_log_p, nan=0.0)  # handle nan when all logits are -inf
+    entropy = -torch.sum(p_log_p, dim=-1)
     return entropy
 
 
@@ -167,13 +175,111 @@ def sft_microbatch_train_step(
     return loss, metadata
 
 
+def log_generations(
+    prompt_strs: list[str],
+    answer_strs: list[str],
+    model: PreTrainedModel,
+    tokenizer: PreTrainedTokenizerBase,
+    max_new_tokens: int = 1024,
+    temperature: float = 1.0,
+    top_p: float = 1.0,
+    stop_strings: list[str] | None = None,
+) -> None:
+    """
+    Log the generations of the model given the prompts.
+    Args:
+        prompts_strs: list of prompt strings
+        outputs_strs: list of output strings
+        model: PreTrainedModel placed on the correct device and in inference mode
+        tokenizer: PreTrainedTokenizerBase
+    """
+    model.eval()
+    with torch.no_grad():
+        inputs = tokenizer(
+            prompt_strs, return_tensors="pt", padding=True, padding_side="left"
+        ).to(model.device)
+        generated: GenerateDecoderOnlyOutput = model.generate(  # type: ignore
+            input_ids=inputs["input_ids"],
+            attention_mask=inputs["attention_mask"],
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            do_sample=True,
+            output_scores=True,
+            return_dict_in_generate=True,
+            pad_token_id=tokenizer.pad_token_id,
+            tokenizer=tokenizer,
+            stop_strings=stop_strings,
+        )
+        response_ids = generated.sequences[:, inputs["input_ids"].shape[1] :]  # type: ignore
+        response_strs = tokenizer.batch_decode(response_ids, skip_special_tokens=True)
+        response_mask = response_ids.ne(
+            tokenizer.pad_token_id  # type: ignore
+        )  # (batch_size, response_len)
+        logits = torch.stack(generated.scores).permute(  # type: ignore
+            1, 0, 2
+        )  # (batch_size, seq_len, vocab_size)
+        entropy = compute_entropy(logits)  # (batch_size, seq_len)
+        entropy = masked_normalize(
+            entropy,
+            response_mask,
+            normalize_constant=response_mask.sum(dim=1),
+            dim=1,
+        )  # (batch_size,)
+        logs = []
+        correct_lens = []
+        incorrect_lens = []
+        for i in range(len(prompt_strs)):
+            log = {
+                "prompt": prompt_strs[i],
+                "answer": answer_strs[i],
+                "generation": response_strs[i],
+                "reward": r1_zero_reward_fn(response_strs[i], answer_strs[i]),
+                "entropy": entropy[i].item(),
+                "length": response_mask[i].sum().item(),
+            }
+            logs.append(log)
+            if log["reward"]["reward"] > 0:
+                correct_lens.append(log["length"])
+            else:
+                incorrect_lens.append(log["length"])
+        print(
+            json.dumps(
+                {
+                    "logs": logs,
+                    "average_entropy": sum([log["entropy"] for log in logs])
+                    / len(logs),
+                    "average_correct_length": (
+                        sum(correct_lens) / len(correct_lens)
+                        if len(correct_lens) > 0
+                        else 0
+                    ),
+                    "average_incorrect_length": (
+                        sum(incorrect_lens) / len(incorrect_lens)
+                        if len(incorrect_lens) > 0
+                        else 0
+                    ),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+
+
 if __name__ == "__main__":
-    # model = PreTrainedTokenizerBase.from_pretrained(
-    #     "models/Qwen2.5-Math-1.5B",
-    #     torch_dtype=torch.bfloat16,
-    #     attn_implementation="flash_attention_2",
-    # )
-    tokenizer = Qwen2Tokenizer.from_pretrained("models/Qwen2.5-Math-1.5B")
-    tokenize_prompt_and_output(
-        ["Hello, how are you?", "1"], [" I'm fine, thank you.", "2"], tokenizer
+    model = AutoModelForCausalLM.from_pretrained(
+        "models/Qwen2.5-Math-1.5B",
+        torch_dtype=torch.bfloat16,
+        # attn_implementation="flash_attention_2",
+        device_map="cpu",
+    )
+    tokenizer = AutoTokenizer.from_pretrained("models/Qwen2.5-Math-1.5B")
+    prompt_strs = [
+        "I will repeat: <think> </think> <answer>2</answer> <think> </think> <answer>2</answer> <think> </think> <answer>2</answer> <think>",
+    ]
+    answer_strs = [
+        " 2",
+    ]
+    log_generations(
+        prompt_strs, answer_strs, model, tokenizer, 16, stop_strings=["</answer>"]
     )
