@@ -231,7 +231,9 @@ def run_masked_mean(
         torch.Tensor, the mean of the tensor along the specified
             dimension, considering only the elements with mask value 1.
     """
-    raise NotImplementedError
+    from cs336_alignment.grpo import masked_mean
+
+    return masked_mean(tensor, mask, dim)
 
 
 def run_sft_microbatch_train_step(
